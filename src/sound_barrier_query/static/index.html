@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>声屏障标准查询系统</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">声</div>
+        <div>
+          <h1>声屏障标准 · 知识库</h1>
+          <p id="meta">正在载入标准库...</p>
+        </div>
+      </div>
+      <nav class="topnav" aria-label="主导航">
+        <button class="topnav-button active" id="nav-home" type="button">首页</button>
+        <button class="topnav-button" id="nav-library" type="button">标准库</button>
+        <button class="topnav-button" id="nav-assistant" type="button">AI助手</button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="home-view" id="home-view">
+        <div class="home-inner">
+          <div class="eyebrow">NOISE BARRIER · STANDARDS KNOWLEDGE BASE</div>
+          <h2 class="home-title">声屏障标准 · 快速查询</h2>
+          <p class="home-copy">
+            基于现有声屏障标准汇总表，支持标准号、产品/材料名称和技术关键词检索。
+          </p>
+          <section class="home-search-panel" aria-label="首页查询">
+            <div class="home-search-row">
+              <input
+                id="home-search"
+                type="search"
+                placeholder="输入标准号、产品名称或技术关键词（如 Q/CR760、岩棉、面密度）"
+              />
+              <button id="home-search-button" type="button">检索</button>
+            </div>
+            <div class="quick-actions home-quick-actions">
+              <button data-query="岩棉">岩棉</button>
+              <button data-query="金属单元板">金属单元板</button>
+              <button data-query="面密度">面密度</button>
+              <button data-query="燃烧性能">燃烧性能</button>
+            </div>
+          </section>
+
+          <div class="stats">
+            <div>
+              <strong id="stat-clauses">0</strong>
+              <span>标准内容</span>
+            </div>
+            <div>
+              <strong id="stat-materials">0</strong>
+              <span>产品/材料</span>
+            </div>
+            <div>
+              <strong id="stat-standards">0</strong>
+              <span>标准/文件</span>
+            </div>
+          </div>
+
+          <section class="home-ai-card" aria-label="AI助手快捷提问">
+            <div class="home-ai-card-header">
+              <h3>AI助手</h3>
+              <p>输入声屏障标准相关问题，自动进入助手界面并生成回答。</p>
+            </div>
+            <form class="home-ai-form" id="home-ai-form" autocomplete="off">
+              <input
+                id="home-ai-input"
+                type="search"
+                placeholder="例如：岩棉的国内标准和项目名称"
+                aria-label="AI助手问题输入框"
+              />
+              <button id="home-ai-submit" type="submit">提问</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <section class="library-view view-hidden" id="library-view">
+        <div class="layout">
+          <aside class="sidebar">
+            <button
+              class="nav-toggle"
+              id="nav-toggle"
+              type="button"
+              aria-label="折叠导航"
+              aria-expanded="true"
+              title="折叠导航"
+            >
+              ‹
+            </button>
+            <div class="sidebar-title">导航</div>
+            <button class="home-link" id="home">首页概览</button>
+            <nav id="material-nav" class="material-nav" aria-label="材料导航"></nav>
+          </aside>
+
+          <section class="content">
+            <section class="query-panel">
+              <label for="query">输入标准名称、标准号、产品/材料名称或技术关键词进行检索</label>
+              <div class="search-row">
+                <input id="query" type="search" placeholder="例如：岩棉 / 金属单元板 / Q/CR760 / 面密度" />
+                <button id="search">搜索</button>
+              </div>
+              <div class="quick-actions">
+                <button data-query="岩棉">岩棉</button>
+                <button data-query="金属单元板">金属单元板</button>
+                <button data-query="亚克力板">亚克力板</button>
+                <button data-query="PC板">PC板</button>
+                <button data-query="面密度">面密度</button>
+              </div>
+            </section>
+
+            <section id="assistant-panel" class="assistant-panel hidden">
+              <h2>检索回复</h2>
+              <p id="summary"></p>
+              <div id="suggestions"></div>
+            </section>
+
+            <section class="result-panel">
+              <div class="breadcrumb" id="breadcrumb">首页 › 国内标准</div>
+              <div class="result-header">
+                <div>
+                  <h2 id="table-title">标准技术要求</h2>
+                  <p id="table-subtitle"></p>
+                </div>
+                <span id="count">0 行</span>
+              </div>
+              <div id="results" class="results"></div>
+            </section>
+          </section>
+        </div>
+      </section>
+
+      <section class="assistant-view view-hidden" id="assistant-view">
+        <div class="chat-shell" aria-label="AI助手">
+          <header class="chat-header">
+            <div class="chat-header-text">
+              <h2>AI助手</h2>
+              <p id="chat-status">基于声屏障标准汇总表检索增强回答</p>
+            </div>
+            <button type="button" class="chat-clear" id="chat-clear">清空对话</button>
+          </header>
+
+          <div class="chat-messages" id="chat-messages" aria-live="polite"></div>
+
+          <form class="chat-composer" id="chat-form" autocomplete="off">
+            <textarea
+              id="chat-input"
+              rows="2"
+              placeholder="例如：岩棉的国内标准和项目名称 / 金属单元板面密度有哪些要求？"
+              aria-label="提问输入框"
+            ></textarea>
+            <button type="submit" id="chat-send">发送</button>
+          </form>
+
+          <div class="chat-suggestions" aria-label="快速提问">
+            <button type="button" data-question="岩棉的国内标准和项目名称">岩棉的国内标准</button>
+            <button type="button" data-question="金属单元板面密度有哪些要求？">金属单元板面密度</button>
+            <button type="button" data-question="PC板透光率相关标准是什么？">PC板透光率</button>
+            <button type="button" data-question="隔声量相关内容有哪些？">隔声量相关内容</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

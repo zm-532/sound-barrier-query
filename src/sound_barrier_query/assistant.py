@@ -1,0 +1,295 @@
+from __future__ import annotations
+
+import re
+from collections import Counter
+from collections.abc import Callable, Iterable
+from typing import Any
+
+from .config import LLMConfig
+from .llm import ChatMessage, LLMError, chat_completions
+from .search import SearchEngine
+
+SYSTEM_PROMPT = (
+    "你是“声屏障标准查询系统”的AI助手，"
+    "只能依据用户问题下方提供的【检索上下文】中来自《国内声屏障标准汇总表》的真实条款进行回答。\n"
+    "严格要求：\n"
+    "1. 不得编造任何标准号、标准名称、项目名称、检测项目、技术要求或数值。\n"
+    "2. 如果【检索上下文】中没有任何与用户问题相关的内容，必须明确回答："
+    "“当前标准库未检索到相关内容”，并提示用户换一种说法。\n"
+    "3. 回答时尽量使用中文，结构清晰，可适当引用原文技术要求，但不要逐条复述。\n"
+    "4. 在回答中需要包含：涉及的产品/材料、项目名称（检测项目）、相关标准名称或标准号、"
+    "技术要求摘要，以及来源信息（sheet!单元格）。\n"
+    "5. 不要在回答里出现“我无法访问互联网/数据库”之类的免责声明；只基于上下文回答即可。"
+)
+
+NO_RESULT_MESSAGE = "当前标准库未检索到相关内容。"
+CONFIG_MISSING_MESSAGE = "AI接口未配置完整，请检查 .env 中 BASE_URL/API_KEY/MODEL。"
+
+LLMCaller = Callable[[list[ChatMessage]], str]
+
+
+class StandardAssistant:
+    def __init__(
+        self,
+        engine: SearchEngine,
+        config: LLMConfig | None = None,
+        llm_caller: LLMCaller | None = None,
+    ):
+        self.engine = engine
+        self.config = config
+        self._llm_caller = llm_caller
+
+    def retrieve(self, question: str, limit: int = 12) -> list[dict[str, Any]]:
+        return _retrieve(self.engine, question, limit)
+
+    def answer(self, question: str, limit: int = 12) -> dict[str, Any]:
+        """本地检索版回答：与历史 API 保持一致，不调用大模型。"""
+        clauses = _retrieve(self.engine, question, limit)
+        if not clauses:
+            return {
+                "summary": "未在当前声屏障标准库中检索到直接相关内容。",
+                "clauses": [],
+                "suggestions": ["尝试输入标准号、产品名称或检测项目关键词。"],
+            }
+
+        products = Counter(str(clause["product"]) for clause in clauses)
+        items = Counter(str(clause["item"]) for clause in clauses)
+        standards = {str(clause["standard"]) for clause in clauses}
+
+        top_product = products.most_common(1)[0][0]
+        top_items = "、".join(item for item, _ in items.most_common(3))
+        summary = (
+            f"检索到与“{question}”相关的 {len(clauses)} 条标准内容，"
+            f"主要涉及 {top_product} 的 {top_items} 等要求，"
+            f"覆盖 {len(standards)} 个标准或技术文件。以下结论均来自当前标准库条款。"
+        )
+
+        return {
+            "summary": summary,
+            "clauses": clauses,
+            "suggestions": self._build_suggestions(clauses),
+        }
+
+    def answer_with_llm(
+        self,
+        question: str,
+        clauses: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not clauses:
+            return {
+                "answer": NO_RESULT_MESSAGE,
+                "summary": NO_RESULT_MESSAGE,
+                "clauses": [],
+                "sources": [],
+            }
+        if self.config is None or not self.config.is_complete():
+            return {
+                "answer": CONFIG_MISSING_MESSAGE,
+                "summary": CONFIG_MISSING_MESSAGE,
+                "clauses": clauses,
+                "sources": [_to_source(clause) for clause in clauses],
+                "error": "config_missing",
+            }
+
+        messages = build_rag_messages(question, clauses)
+        try:
+            if self._llm_caller is not None:
+                content = self._llm_caller(messages)
+            else:
+                content = chat_completions(self.config, messages)
+        except LLMError as error:
+            return {
+                "answer": str(error),
+                "summary": str(error),
+                "clauses": clauses,
+                "sources": [_to_source(clause) for clause in clauses],
+                "error": "llm_failed",
+            }
+
+        text = clean_llm_answer(content) or NO_RESULT_MESSAGE
+        return {
+            "answer": text,
+            "summary": text,
+            "clauses": clauses,
+            "sources": [_to_source(clause) for clause in clauses],
+        }
+
+    def _build_suggestions(self, clauses: list[dict[str, Any]]) -> list[str]:
+        suggestions: list[str] = []
+        for clause in clauses[:3]:
+            suggestions.append(
+                f"查看 {clause['product']} / {clause['item']} / {clause['standard']}"
+            )
+        return suggestions
+
+
+def _retrieve(engine: SearchEngine, question: str, limit: int) -> list[dict[str, Any]]:
+    product_hits: list[dict[str, Any]] = []
+    matched_product = ""
+    for product in engine.products:
+        if product and product in question:
+            matched_product = product
+            product_hits = engine.search_product(product, limit=limit * 4)
+            break
+
+    if product_hits:
+        ranked = _filter_by_terms(product_hits, question, matched_product)
+    else:
+        ranked = _search_with_terms(engine, question, limit=limit * 4)
+
+    if not ranked and not product_hits:
+        ranked = engine.search_keyword(question, limit=limit * 4)
+
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for row in ranked:
+        key = str(row.get("source_id", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
+def _filter_by_terms(
+    rows: list[dict[str, Any]],
+    question: str,
+    matched_product: str,
+) -> list[dict[str, Any]]:
+    question_terms = _split_terms(question.replace(matched_product, " "))
+    if not question_terms:
+        return rows
+    filtered = [
+        row
+        for row in rows
+        if any(
+            term in str(row.get("item", "")) or term in str(row.get("requirement", ""))
+            for term in question_terms
+        )
+    ]
+    return filtered or rows
+
+
+def _search_with_terms(
+    engine: SearchEngine,
+    question: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    terms = _split_terms(question)
+    if not terms:
+        return []
+    seen: dict[str, dict[str, Any]] = {}
+    for term in terms:
+        for row in engine.search_keyword(term, limit=limit):
+            key = str(row.get("source_id", ""))
+            if key in seen:
+                continue
+            seen[key] = row
+            if len(seen) >= limit:
+                break
+        if len(seen) >= limit:
+            break
+    return list(seen.values())
+
+
+def _to_source(clause: dict[str, Any]) -> dict[str, str]:
+    return {
+        "product": str(clause.get("product", "")),
+        "item": str(clause.get("item", "")),
+        "standard": str(clause.get("standard", "")),
+        "requirement": str(clause.get("requirement", "")),
+        "source_id": str(clause.get("source_id", "")),
+        "source_link": str(clause.get("source_link", "")),
+        "sheet": str(clause.get("sheet", "")),
+    }
+
+
+def build_rag_messages(
+    question: str, clauses: Iterable[dict[str, Any]]
+) -> list[ChatMessage]:
+    clauses_list = list(clauses)
+    context = _format_context(clauses_list)
+    user_prompt = (
+        f"【检索上下文】\n{context}\n\n"
+        f"【用户问题】\n{question}\n\n"
+        "请基于【检索上下文】回答用户问题；如上下文与问题无关或信息不足，请明确说明“当前标准库未检索到相关内容”。"
+    )
+    return [
+        ChatMessage(role="system", content=SYSTEM_PROMPT),
+        ChatMessage(role="user", content=user_prompt),
+    ]
+
+
+def _format_context(clauses: list[dict[str, Any]]) -> str:
+    if not clauses:
+        return "（无检索结果）"
+    lines: list[str] = []
+    for index, clause in enumerate(clauses, start=1):
+        product = clause.get("product", "")
+        item = clause.get("item", "")
+        standard = clause.get("standard", "")
+        requirement = clause.get("requirement", "")
+        source_id = clause.get("source_id", "")
+        lines.append(
+            f"{index}. 产品/材料：{product}；项目名称：{item}；"
+            f"标准：{standard}；技术要求：{requirement}；来源：{source_id}"
+        )
+    return "\n".join(lines)
+
+
+def _split_terms(question: str) -> list[str]:
+    text = question
+    for stop_word in ("有什么", "有哪些", "什么", "要求", "相关", "标准", "内容", "了解", "是", "哪些", "有哪些", "的"):
+        text = text.replace(stop_word, " ")
+    separators = " ，,。？?；;：:"
+    terms: list[str] = []
+    current = ""
+    for char in text:
+        if char in separators:
+            if current:
+                terms.append(current)
+                current = ""
+        else:
+            current += char
+    if current:
+        terms.append(current)
+
+    long_terms = [term for term in terms if len(term) >= 2]
+    if not long_terms:
+        return []
+
+    # 仅对中文片段做 2-gram 滑窗，过滤掉纯 ASCII 噪音
+    expanded: list[str] = []
+    for term in long_terms:
+        if _is_chinese(term) and len(term) > 3:
+            for start in range(len(term) - 1):
+                chunk = term[start:start + 2]
+                if len(chunk) >= 2:
+                    expanded.append(chunk)
+        else:
+            expanded.append(term)
+    # 只保留含有中文的项，去重保持顺序
+    seen: set[str] = set()
+    result: list[str] = []
+    for term in expanded:
+        if not _is_chinese(term):
+            continue
+        if term not in seen:
+            seen.add(term)
+            result.append(term)
+    return result
+
+
+def _is_chinese(text: str) -> bool:
+    return any("一" <= ch <= "鿿" for ch in text)
+
+
+def clean_llm_answer(content: str | None) -> str:
+    text = (content or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"<think\b[^>]*>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<think\b[^>]*>.*$", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()

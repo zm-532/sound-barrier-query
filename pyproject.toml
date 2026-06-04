@@ -1,0 +1,17 @@
+[project]
+name = "sound-barrier-query"
+version = "0.1.0"
+description = "Local sound barrier standard query system"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+sound-barrier-query = "sound_barrier_query.web:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sound_barrier_query"]
