@@ -134,7 +134,7 @@ class SearchEngine:
                     "matched_material": material,
                     "matched_terms": [],
                     "missing_terms": [],
-                    "summary": f"已匹配到材料/产品“{material}”，以下是该材料/产品的标准信息。",
+                    "summary": f"已识别到材料“{material}”，下方展示该材料的标准信息。",
                     "table": table,
                     "results": [],
                 }
@@ -163,7 +163,7 @@ class SearchEngine:
                 "matched_material": material,
                 "matched_terms": [],
                 "missing_terms": terms,
-                "summary": f"未检索到“{material}”中与“{'、'.join(terms)}”直接相关的条目，以下是“{material}”的标准信息。",
+                "summary": f"未检索到“{material} + {'、'.join(terms)}”的直接条目，已为你展示“{material}”的完整标准信息。",
                 "table": table,
                 "results": [],
             }
@@ -280,10 +280,10 @@ def _material_match_summary(material: str, matched_terms: list[str], missing_ter
     matched_text = "、".join(matched_terms)
     if missing_terms:
         return (
-            f"已匹配到材料/产品“{material}”，并找到 {count} 行与“{matched_text}”相关的内容；"
-            f"未检索到与“{'、'.join(missing_terms)}”直接相关的条目。"
+            f"已识别到材料“{material}”和关键词“{matched_text}”，下方展示相关标准条目（共 {count} 行）；"
+            f"未检索到关键词“{'、'.join(missing_terms)}”的直接条目。"
         )
-    return f"已匹配到材料/产品“{material}”，检索到 {count} 行与“{matched_text}”相关的标准信息。"
+    return f"已识别到材料“{material}”和关键词“{matched_text}”，下方展示相关标准条目（共 {count} 行）。"
 
 
 def _score_text(needle: str, haystack: str) -> int:

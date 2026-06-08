@@ -122,7 +122,8 @@ class TestSearchEngine(unittest.TestCase):
         self.assertEqual(payload["matched_material"], "岩棉")
         self.assertIn("厚度", payload["matched_terms"])
         self.assertEqual(payload["missing_terms"], [])
-        self.assertIn("检索到", payload["summary"])
+        self.assertIn("已识别到材料“岩棉”和关键词“厚度”", payload["summary"])
+        self.assertIn("下方展示相关标准条目", payload["summary"])
         table = payload["table"]
         self.assertEqual(table["material"], "岩棉")
         self.assertTrue(table["rows"])
@@ -138,7 +139,8 @@ class TestSearchEngine(unittest.TestCase):
         self.assertEqual(payload["result_type"], "material_table")
         self.assertEqual(payload["matched_material"], "岩棉")
         self.assertIn("不存在指标", payload["missing_terms"])
-        self.assertIn("未检索到", payload["summary"])
+        self.assertIn("未检索到“岩棉 + 不存在指标”的直接条目", payload["summary"])
+        self.assertIn("已为你展示“岩棉”的完整标准信息", payload["summary"])
         self.assertEqual(len(payload["table"]["rows"]), len(full_table["rows"]))
 
 
@@ -537,6 +539,7 @@ class TestStaticUi(unittest.TestCase):
         self.assertIn('id="nav-library"', html)
         self.assertIn('id="nav-assistant"', html)
         self.assertIn('id="home-search"', html)
+        self.assertIn("可输入：岩棉厚度、金属单元板面密度、Q/CR760", html)
         self.assertIn('id="stat-clauses"', html)
         self.assertIn('id="stat-materials"', html)
         self.assertIn('id="stat-standards"', html)
@@ -587,6 +590,8 @@ class TestStaticUi(unittest.TestCase):
         self.assertIn("AI助手", html)
         self.assertIn('id="home-ai-input"', html)
         self.assertIn('id="home-ai-form"', html)
+        self.assertIn("适合提问：帮我总结岩棉相关标准", html)
+        self.assertIn("帮我总结岩棉相关标准", html)
         self.assertIn(".home-ai-card", css)
         self.assertIn("submitHomeAssistantQuestion", js)
         self.assertIn('showView("assistant")', js)
@@ -601,6 +606,33 @@ class TestStaticUi(unittest.TestCase):
         self.assertIn("/api/fuzzy-search", js)
         self.assertIn("renderFuzzySearchResult", js)
         self.assertIn("renderSearchSummary", js)
+
+    def test_tables_use_compact_column_widths_and_match_highlight(self):
+        static_dir = Path(__file__).resolve().parents[1] / "src" / "sound_barrier_query" / "static"
+        css = (static_dir / "styles.css").read_text(encoding="utf-8")
+        js = (static_dir / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("renderColumnGroup", js)
+        self.assertIn("<colgroup>", js)
+        self.assertIn("tableMinWidth", js)
+        self.assertIn("isMatchedRow", js)
+        self.assertIn("match-row", js)
+        self.assertIn("width: 100%;", css)
+        self.assertNotIn("width: max-content", css)
+        self.assertIn("col.index-col { width: 64px; }", css)
+        self.assertIn("col.part-col { width: 120px; }", css)
+        self.assertIn("col.item-col { width: 180px; }", css)
+        self.assertNotIn("col.standard-col { width: 220px; }", css)
+        self.assertIn("tbody tr.match-row", css)
+
+    def test_table_body_cells_are_center_aligned(self):
+        static_dir = Path(__file__).resolve().parents[1] / "src" / "sound_barrier_query" / "static"
+        css = (static_dir / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn("th, td", css)
+        self.assertIn("text-align: center;", css)
+        self.assertIn(".requirement { white-space: pre-wrap; text-align: center; }", css)
+        self.assertNotIn(".requirement { white-space: pre-wrap; text-align: left; }", css)
 
 
 if __name__ == "__main__":

@@ -536,7 +536,10 @@ function renderFuzzySearchResult(data) {
   if (data.result_type === "material_table" && data.table) {
     state.activeMaterial = data.table.material || "";
     setActiveNav(state.activeMaterial);
-    renderMaterialTable(data.table);
+    renderMaterialTable({
+      ...data.table,
+      highlight_terms: data.matched_terms || [],
+    });
     return;
   }
 
@@ -573,7 +576,8 @@ function renderMaterialTable(data) {
 
   const columns = [...data.base_columns, ...data.standard_columns];
   resultsEl.innerHTML = `
-    <table>
+    <table style="min-width: ${tableMinWidth(columns)}px;">
+      ${renderColumnGroup(columns)}
       <thead>
         <tr class="table-band">
           <th colspan="${columns.length}">${escapeHtml(data.title)}</th>
@@ -588,7 +592,7 @@ function renderMaterialTable(data) {
         ${data.rows
           .map(
             (row) => `
-              <tr>
+              <tr${isMatchedRow(row, data.highlight_terms || []) ? ' class="match-row"' : ""}>
                 ${columns
                   .map(
                     (column) =>
@@ -613,8 +617,10 @@ function renderClauseRowsAsTable(query, clauses) {
     return;
   }
 
+  const columns = ["材料/产品", "项目名称", "标准", "技术要求", "来源"];
   resultsEl.innerHTML = `
-    <table>
+    <table style="min-width: ${tableMinWidth(columns)}px;">
+      ${renderColumnGroup(columns)}
       <thead>
         <tr>
           <th class="part-col">材料/产品</th>
@@ -659,15 +665,51 @@ function findMaterial(query) {
   );
 }
 
+function renderColumnGroup(columns) {
+  return `
+      <colgroup>
+        ${columns.map((column) => `<col class="${columnClass(column)}">`).join("")}
+      </colgroup>`;
+}
+
+function tableMinWidth(columns) {
+  return columns.reduce((total, column) => total + columnWidth(column), 0);
+}
+
+function columnWidth(column) {
+  const className = columnClass(column);
+  if (className === "index-col") {
+    return 64;
+  }
+  if (className === "part-col" || className === "source-col") {
+    return 120;
+  }
+  if (className === "item-col") {
+    return 180;
+  }
+  return 220;
+}
+
+function isMatchedRow(row, terms) {
+  if (!terms.length) {
+    return false;
+  }
+  const haystack = normalize(Object.values(row).join(""));
+  return terms.some((term) => haystack.includes(normalize(term)));
+}
+
 function columnClass(column) {
   if (column === "序号") {
     return "index-col";
   }
-  if (column === "部件") {
+  if (column === "部件" || column === "材料/产品") {
     return "part-col";
   }
-  if (column === "检测项目") {
+  if (column === "检测项目" || column === "项目名称") {
     return "item-col";
+  }
+  if (column === "来源") {
+    return "source-col";
   }
   return "standard-col";
 }
