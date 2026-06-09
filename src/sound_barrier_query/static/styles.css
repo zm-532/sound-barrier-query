@@ -848,6 +848,21 @@ label {
   font-size: 15px;
 }
 
+.query-hint {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.query-examples {
+  margin-top: 4px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
 .quick-actions {
   display: flex;
   gap: 10px;

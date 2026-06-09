@@ -699,9 +699,17 @@ class TestStaticUi(unittest.TestCase):
     def test_library_search_uses_fuzzy_endpoint_and_summary_panel(self):
         static_dir = Path(__file__).resolve().parents[1] / "src" / "sound_barrier_query" / "static"
         html = (static_dir / "index.html").read_text(encoding="utf-8")
+        css = (static_dir / "styles.css").read_text(encoding="utf-8")
         js = (static_dir / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('id="assistant-panel"', html)
+        self.assertIn('class="query-hint"', html)
+        self.assertIn("标准库搜索需要输入与 Excel 中一致的关键词才能命中", html)
+        self.assertIn("如果不确定关键词，请使用 AI助手", html)
+        self.assertIn('class="query-examples"', html)
+        self.assertIn("例如：岩棉、金属单元板、面密度、Q/CR760", html)
+        self.assertIn(".query-hint", css)
+        self.assertIn(".query-examples", css)
         self.assertIn("/api/fuzzy-search", js)
         self.assertIn("renderFuzzySearchResult", js)
         self.assertIn("renderSearchSummary", js)
