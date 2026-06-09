@@ -15,6 +15,7 @@ const assistantView = document.querySelector("#assistant-view");
 const navHome = document.querySelector("#nav-home");
 const navLibrary = document.querySelector("#nav-library");
 const navAssistant = document.querySelector("#nav-assistant");
+const floatingAssistantEl = document.querySelector("#floating-ai-assistant");
 const homeSearchInput = document.querySelector("#home-search");
 const homeSearchButton = document.querySelector("#home-search-button");
 const homeAiFormEl = document.querySelector("#home-ai-form");
@@ -40,6 +41,13 @@ const chatSendEl = document.querySelector("#chat-send");
 const chatClearEl = document.querySelector("#chat-clear");
 const chatStatusEl = document.querySelector("#chat-status");
 const chatSuggestionEls = document.querySelectorAll(".chat-suggestions button");
+const floatingAssistantDrag = {
+  pointerId: null,
+  offsetY: 0,
+  startY: 0,
+  moved: false,
+  suppressClick: false,
+};
 
 navHome.addEventListener("click", () => showView("home"));
 navLibrary.addEventListener("click", () => {
@@ -49,9 +57,9 @@ navLibrary.addEventListener("click", () => {
   }
 });
 navAssistant.addEventListener("click", () => {
-  showView("assistant");
-  ensureChatGreeting();
+  openAssistantView();
 });
+initFloatingAssistant();
 homeSearchButton.addEventListener("click", () => runSearch(homeSearchInput.value));
 homeSearchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -260,6 +268,82 @@ function setChatBusy(busy) {
   state.chatBusy = busy;
   chatSendEl.disabled = busy;
   chatInputEl.disabled = busy;
+}
+
+function openAssistantView() {
+  showView("assistant");
+  ensureChatGreeting();
+  window.requestAnimationFrame(() => chatInputEl?.focus());
+}
+
+function handleFloatingAssistantClick(event) {
+  if (floatingAssistantDrag.suppressClick) {
+    event.preventDefault();
+    floatingAssistantDrag.suppressClick = false;
+    return;
+  }
+  openAssistantView();
+}
+
+function initFloatingAssistant() {
+  if (!floatingAssistantEl) {
+    return;
+  }
+  const clampFloatingTop = (top) => {
+    const rect = floatingAssistantEl.getBoundingClientRect();
+    const padding = 12;
+    const minTop = padding;
+    const maxTop = Math.max(minTop, window.innerHeight - rect.height - padding);
+    return Math.min(Math.max(top, minTop), maxTop);
+  };
+
+  const setTop = (top) => {
+    floatingAssistantEl.style.top = `${clampFloatingTop(top)}px`;
+  };
+
+  floatingAssistantEl.addEventListener("click", handleFloatingAssistantClick);
+  floatingAssistantEl.addEventListener("pointerdown", (event) => {
+    floatingAssistantDrag.pointerId = event.pointerId;
+    floatingAssistantDrag.offsetY = event.clientY - floatingAssistantEl.getBoundingClientRect().top;
+    floatingAssistantDrag.startY = event.clientY;
+    floatingAssistantDrag.moved = false;
+    floatingAssistantEl.setPointerCapture(event.pointerId);
+  });
+
+  floatingAssistantEl.addEventListener("pointermove", (event) => {
+    if (floatingAssistantDrag.pointerId !== event.pointerId) {
+      return;
+    }
+    const distance = Math.abs(event.clientY - floatingAssistantDrag.startY);
+    if (distance > 4) {
+      floatingAssistantDrag.moved = true;
+      floatingAssistantEl.classList.add("is-dragging");
+    }
+    setTop(event.clientY - floatingAssistantDrag.offsetY);
+  });
+
+  floatingAssistantEl.addEventListener("pointerup", (event) => {
+    if (floatingAssistantDrag.pointerId !== event.pointerId) {
+      return;
+    }
+    floatingAssistantEl.releasePointerCapture(event.pointerId);
+    floatingAssistantEl.classList.remove("is-dragging");
+    floatingAssistantDrag.pointerId = null;
+    floatingAssistantDrag.suppressClick = floatingAssistantDrag.moved;
+  });
+
+  floatingAssistantEl.addEventListener("pointercancel", (event) => {
+    if (floatingAssistantDrag.pointerId !== event.pointerId) {
+      return;
+    }
+    floatingAssistantEl.classList.remove("is-dragging");
+    floatingAssistantDrag.pointerId = null;
+    floatingAssistantDrag.suppressClick = false;
+  });
+
+  window.addEventListener("resize", () => {
+    setTop(floatingAssistantEl.getBoundingClientRect().top);
+  });
 }
 
 function renderChatMessages() {

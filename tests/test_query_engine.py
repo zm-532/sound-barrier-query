@@ -674,6 +674,28 @@ class TestStaticUi(unittest.TestCase):
         self.assertIn('showView("assistant")', js)
         self.assertIn("chatInputEl.value = question", js)
 
+    def test_floating_ai_assistant_entry_is_fixed_draggable_and_opens_chat(self):
+        static_dir = Path(__file__).resolve().parents[1] / "src" / "sound_barrier_query" / "static"
+        html = (static_dir / "index.html").read_text(encoding="utf-8")
+        css = (static_dir / "styles.css").read_text(encoding="utf-8")
+        js = (static_dir / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="floating-ai-assistant"', html)
+        self.assertIn("AI助手", html)
+        self.assertIn('aria-label="打开AI助手"', html)
+        self.assertIn(".floating-ai-assistant", css)
+        self.assertIn("position: fixed;", css)
+        self.assertIn("border-radius: 50%;", css)
+        self.assertIn("touch-action: none;", css)
+        self.assertIn("#e0f2fe", css)
+        self.assertIn("#7dd3fc", css)
+        self.assertNotIn("linear-gradient(145deg, #38bdf8 0%, var(--accent) 48%, #1e3a8a 100%)", css)
+        self.assertIn("initFloatingAssistant", js)
+        self.assertIn("floatingAssistantEl", js)
+        self.assertIn("handleFloatingAssistantClick", js)
+        self.assertIn('showView("assistant")', js)
+        self.assertIn("ensureChatGreeting();", js)
+
     def test_library_search_uses_fuzzy_endpoint_and_summary_panel(self):
         static_dir = Path(__file__).resolve().parents[1] / "src" / "sound_barrier_query" / "static"
         html = (static_dir / "index.html").read_text(encoding="utf-8")

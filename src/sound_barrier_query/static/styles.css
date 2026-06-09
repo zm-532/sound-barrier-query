@@ -115,6 +115,84 @@ h2 { font-size: 18px; font-weight: 600; }
   display: none !important;
 }
 
+.floating-ai-assistant {
+  position: fixed;
+  top: calc(50% - 38px);
+  right: 22px;
+  z-index: 80;
+  width: 76px;
+  height: 76px;
+  border: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 32% 24%, rgba(255, 255, 255, 0.98) 0 13%, rgba(255, 255, 255, 0) 28%),
+    linear-gradient(145deg, #e0f2fe 0%, #bae6fd 42%, #7dd3fc 100%);
+  color: #075985;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  box-shadow:
+    0 18px 34px rgba(14, 165, 233, 0.2),
+    0 0 0 1px rgba(255, 255, 255, 0.7) inset,
+    0 0 0 8px rgba(186, 230, 253, 0.32);
+  transition: transform 0.18s ease, box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.floating-ai-assistant::after {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  pointer-events: none;
+}
+
+.floating-ai-assistant:hover {
+  transform: translateX(-3px) scale(1.04);
+  filter: saturate(1.08);
+  box-shadow:
+    0 22px 42px rgba(14, 165, 233, 0.26),
+    0 0 0 1px rgba(255, 255, 255, 0.78) inset,
+    0 0 0 10px rgba(186, 230, 253, 0.38);
+}
+
+.floating-ai-assistant:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.28);
+  outline-offset: 4px;
+}
+
+.floating-ai-assistant.is-dragging {
+  cursor: grabbing;
+  transform: scale(1.03);
+  transition: box-shadow 0.18s ease, filter 0.18s ease;
+}
+
+.floating-ai-assistant-icon,
+.floating-ai-assistant-text {
+  position: relative;
+  z-index: 1;
+  line-height: 1;
+}
+
+.floating-ai-assistant-icon {
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.floating-ai-assistant-text {
+  margin-top: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
 .home-view {
   min-height: calc(100vh - 69px);
   padding: 9vh 24px 12vh;
@@ -946,4 +1024,11 @@ tbody tr.match-row:nth-child(even) { background: #eaf2ff; }
   .chat-shell { height: calc(100vh - 180px); }
   .chat-composer { flex-direction: column; }
   #chat-send { min-height: 48px; }
+  .floating-ai-assistant {
+    right: 14px;
+    width: 66px;
+    height: 66px;
+  }
+  .floating-ai-assistant-icon { font-size: 17px; }
+  .floating-ai-assistant-text { font-size: 12px; }
 }
