@@ -5,9 +5,15 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from .aliases import (
+    expand_query_with_aliases,
+    item_terms_for_query,
+    material_item_terms_for_query,
+    scope_terms_for_query,
+)
 from .config import LLMConfig
 from .llm import ChatMessage, LLMError, chat_completions
-from .search import SearchEngine
+from .search import SearchEngine, normalize
 
 SYSTEM_PROMPT = (
     "你是“声屏障标准查询系统”的AI助手，"
@@ -124,21 +130,44 @@ class StandardAssistant:
 
 
 def _retrieve(engine: SearchEngine, question: str, limit: int) -> list[dict[str, Any]]:
+    expanded_question = expand_query_with_aliases(question)
+    scope_terms = scope_terms_for_query(question)
+    item_terms = item_terms_for_query(question)
     product_hits: list[dict[str, Any]] = []
     matched_product = ""
-    for product in engine.products:
-        if product and product in question:
+    for product in sorted(engine.materials, key=len, reverse=True):
+        if product and product in expanded_question:
             matched_product = product
-            product_hits = engine.search_product(product, limit=limit * 4)
+            product_hits = engine.search_product(product, limit=max(limit * 4, len(engine.clauses)))
+            strict_hits = [
+                row
+                for row in product_hits
+                if normalize(str(row.get("sheet", ""))) == normalize(product)
+                or normalize(str(row.get("product", ""))) == normalize(product)
+            ]
+            if strict_hits:
+                product_hits = strict_hits
             break
+    if not product_hits:
+        for product in sorted(engine.products, key=len, reverse=True):
+            if product and product in expanded_question:
+                matched_product = product
+                product_hits = engine.search_product(product, limit=max(limit * 4, len(engine.clauses)))
+                break
 
     if product_hits:
-        ranked = _filter_by_terms(product_hits, question, matched_product)
+        group_item_terms = material_item_terms_for_query(matched_product, question)
+        if group_item_terms:
+            ranked = _filter_rows_by_exact_item_terms(product_hits, group_item_terms, scope_terms)
+        else:
+            ranked = _filter_by_terms(product_hits, expanded_question, matched_product, scope_terms)
     else:
-        ranked = _search_with_terms(engine, question, limit=limit * 4)
+        ranked = _search_by_item_terms(engine, item_terms, scope_terms, limit=limit * 4)
+        if not ranked:
+            ranked = _search_with_terms(engine, expanded_question, limit=limit * 4)
 
     if not ranked and not product_hits:
-        ranked = engine.search_keyword(question, limit=limit * 4)
+        ranked = engine.search_keyword(expanded_question, limit=limit * 4)
 
     seen: set[str] = set()
     deduped: list[dict[str, Any]] = []
@@ -157,6 +186,7 @@ def _filter_by_terms(
     rows: list[dict[str, Any]],
     question: str,
     matched_product: str,
+    scope_terms: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     question_terms = _split_terms(question.replace(matched_product, " "))
     if not question_terms:
@@ -165,11 +195,107 @@ def _filter_by_terms(
         row
         for row in rows
         if any(
-            term in str(row.get("item", "")) or term in str(row.get("requirement", ""))
+            normalize(term)
+            in normalize(f"{row.get('item', '')} {row.get('requirement', '')}")
             for term in question_terms
         )
     ]
-    return filtered or rows
+    item_filtered = [
+        row
+        for row in filtered
+        if any(
+            len(normalize(term)) >= 3
+            and normalize(term) in normalize(str(row.get("item", "")))
+            for term in question_terms
+        )
+    ]
+    item_prefix_filtered = [
+        row
+        for row in item_filtered
+        if any(
+            len(normalize(term)) >= 3
+            and normalize(str(row.get("item", ""))).startswith(normalize(term))
+            for term in question_terms
+        )
+    ]
+    if item_prefix_filtered:
+        filtered = item_prefix_filtered
+    elif item_filtered:
+        filtered = item_filtered
+    standard_filtered = _filter_by_standard_scope(filtered, scope_terms or [])
+    if standard_filtered:
+        filtered = standard_filtered
+    return sorted(
+        filtered,
+        key=lambda row: (
+            -_term_match_score(row, question_terms, scope_terms or []),
+            len(normalize(str(row.get("item", "")))),
+        ),
+    ) or rows
+
+
+def _filter_by_standard_scope(rows: list[dict[str, Any]], scope_terms: list[str]) -> list[dict[str, Any]]:
+    normalized_scope_terms = [normalize(term) for term in scope_terms if normalize(term)]
+    if not normalized_scope_terms:
+        return []
+    return [
+        row
+        for row in rows
+        if any(term in normalize(str(row.get("standard", ""))) for term in normalized_scope_terms)
+    ]
+
+
+def _filter_rows_by_exact_item_terms(
+    rows: list[dict[str, Any]],
+    item_terms: list[str],
+    scope_terms: list[str],
+) -> list[dict[str, Any]]:
+    normalized_item_terms = [normalize(term) for term in item_terms if normalize(term)]
+    if not normalized_item_terms:
+        return []
+    filtered = [
+        row
+        for row in rows
+        if normalize(str(row.get("item", ""))) in normalized_item_terms
+    ]
+    scoped_rows = _filter_by_standard_scope(filtered, scope_terms)
+    if scoped_rows:
+        filtered = scoped_rows
+    return sorted(
+        filtered,
+        key=lambda row: (
+            normalized_item_terms.index(normalize(str(row.get("item", "")))),
+            int(row.get("row", 0) or 0),
+            int(row.get("column", 0) or 0),
+        ),
+    )
+
+
+def _term_match_score(row: dict[str, Any], terms: list[str], scope_terms: list[str]) -> int:
+    item = normalize(str(row.get("item", "")))
+    requirement = normalize(str(row.get("requirement", "")))
+    standard = normalize(str(row.get("standard", "")))
+    haystack = f"{item} {requirement}"
+    score = 0
+    for term in terms:
+        normalized_term = normalize(term)
+        if not normalized_term:
+            continue
+        if item == normalized_term:
+            score += 1000
+        elif item.startswith(normalized_term):
+            score += 750
+        elif normalized_term in item:
+            score += 500
+        elif normalized_term in haystack:
+            score += 100
+        if normalized_term in standard:
+            score += 200
+    for term in scope_terms:
+        normalized_term = normalize(term)
+        if normalized_term and normalized_term in standard:
+            score += 300
+    return score
 
 
 def _search_with_terms(
@@ -192,6 +318,44 @@ def _search_with_terms(
         if len(seen) >= limit:
             break
     return list(seen.values())
+
+
+def _search_by_item_terms(
+    engine: SearchEngine,
+    item_terms: list[str],
+    scope_terms: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    normalized_item_terms = [
+        normalize(term)
+        for term in item_terms
+        if len(normalize(term)) >= 3
+    ]
+    if not normalized_item_terms:
+        return []
+
+    rows = [
+        clause.as_dict()
+        for clause in engine.clauses
+        if any(term in normalize(clause.item) for term in normalized_item_terms)
+    ]
+    if not rows:
+        return []
+
+    scoped_rows = _filter_by_standard_scope(rows, scope_terms)
+    if scoped_rows:
+        rows = scoped_rows
+
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            -_term_match_score(row, item_terms, scope_terms),
+            str(row.get("sheet", "")),
+            int(row.get("row", 0) or 0),
+            int(row.get("column", 0) or 0),
+        ),
+    )
+    return rows[:limit]
 
 
 def _to_source(clause: dict[str, Any]) -> dict[str, str]:
@@ -264,6 +428,7 @@ def _split_terms(question: str) -> list[str]:
     expanded: list[str] = []
     for term in long_terms:
         if _is_chinese(term) and len(term) > 3:
+            expanded.append(term)
             for start in range(len(term) - 1):
                 chunk = term[start:start + 2]
                 if len(chunk) >= 2:
