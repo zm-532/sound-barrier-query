@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from .config import LLMConfig
+
+logger = logging.getLogger("sound_barrier_query.llm")
 
 
 class LLMError(RuntimeError):
@@ -49,10 +52,10 @@ def chat_completions(
         "Content-Type": "application/json",
     }
 
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     if poster is None:
         poster = _default_poster(timeout)
 
+    logger.debug("LLM request: url=%s model=%s msgs=%d", url, config.model, len(messages))
     try:
         status, _, raw = poster(url, headers, body)
     except urllib.error.HTTPError as error:

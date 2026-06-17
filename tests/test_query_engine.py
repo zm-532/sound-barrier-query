@@ -1,21 +1,29 @@
 import json
-import tempfile
 import unittest
+from uuid import uuid4
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from sound_barrier_query.assistant import StandardAssistant
+from sound_barrier_query.assistant import StandardAssistant, to_source_dict
 from sound_barrier_query.aliases import expand_query_with_aliases
 from sound_barrier_query.config import LLMConfig, load_llm_config
 from sound_barrier_query.llm import ChatMessage, LLMError, chat_completions
 from sound_barrier_query.models import StandardClause
 from sound_barrier_query.search import SearchEngine
-from sound_barrier_query.web import QueryApi, _source_payload, build_api, create_handler
+from sound_barrier_query.web import QueryApi, build_api, create_handler
 from sound_barrier_query.xlsx_loader import load_workbook_clauses, load_workbook_tables
 
 
 WORKBOOK = Path(__file__).resolve().parents[1] / "docs" / "国内声屏障标准汇总表.xlsx"
 FOREIGN_WORKBOOK = Path(__file__).resolve().parents[1] / "docs" / "国外及香港声屏障标准汇总表本.xlsx"
+TEST_TEMP_DIR = Path(__file__).resolve().parents[1] / ".tmp" / "tests"
+TEST_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _test_directory(name: str) -> Path:
+    directory = TEST_TEMP_DIR / f"{name}-{uuid4().hex}"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
 
 
 class TestStandardClause(unittest.TestCase):
@@ -81,6 +89,26 @@ class TestSearchEngine(unittest.TestCase):
         self.assertTrue(any("面密度" in row["item"] for row in results))
         self.assertTrue(all(row["source_link"].startswith("#source=") for row in results[:10]))
 
+    def test_fuzzy_search_prioritizes_item_match_over_long_requirement_match(self):
+        engine = SearchEngine(
+            [
+                StandardClause("材料A", 2, 4, "材料A", "密度", "标准A", "80~120"),
+                StandardClause(
+                    "材料B",
+                    2,
+                    4,
+                    "材料B",
+                    "其他项目",
+                    "标准B",
+                    "这是一段很长的技术要求文本，其中只在要求内容中提到密度指标。",
+                ),
+            ]
+        )
+
+        payload = engine.fuzzy_search("密度")
+
+        self.assertEqual(payload["results"][0]["item"], "密度")
+
     def test_material_table_keeps_excel_like_rows_and_standard_columns(self):
         table = self.engine.material_table("岩棉")
 
@@ -112,6 +140,16 @@ class TestSearchEngine(unittest.TestCase):
         self.assertEqual(table["standard_columns"], ["性能", "试验方法或计算", "设定值"])
         self.assertEqual(table["rows"][0]["项目名称"], "吸声系数DLα a")
         self.assertEqual(table["rows"][0]["试验方法或计算"], "EN1793-1(测试）")
+
+    def test_material_table_returns_empty_payload_for_unknown_material(self):
+        table = self.engine.material_table("不存在材料")
+
+        self.assertEqual(table["material"], "不存在材料")
+        self.assertEqual(table["title"], "未找到 不存在材料 的标准信息")
+        self.assertEqual(table["base_columns"], [])
+        self.assertEqual(table["standard_columns"], [])
+        self.assertEqual(table["rows"], [])
+        self.assertEqual(table["error"], "material_not_found")
 
     def test_fuzzy_search_filters_material_table_by_item_terms(self):
         tables = load_workbook_tables(WORKBOOK)
@@ -255,36 +293,34 @@ class TestAssistant(unittest.TestCase):
 
 class TestLLMConfig(unittest.TestCase):
     def test_loads_env_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / ".env"
-            env_path.write_text(
-                "BASE_URL=https://example.com/v1\n"
-                "API_KEY=secret-key\n"
-                "MODEL=test-model\n",
-                encoding="utf-8",
-            )
-            config = load_llm_config(env_path)
+        env_path = _test_directory("loads-env-file") / ".env"
+        env_path.write_text(
+            "BASE_URL=https://example.com/v1\n"
+            "API_KEY=secret-key\n"
+            "MODEL=test-model\n",
+            encoding="utf-8",
+        )
+        config = load_llm_config(env_path)
         self.assertEqual(config.base_url, "https://example.com/v1")
         self.assertEqual(config.api_key, "secret-key")
         self.assertEqual(config.model, "test-model")
         self.assertTrue(config.is_complete())
 
     def test_missing_keys_when_file_absent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config = load_llm_config(Path(tmp) / ".env")
+        config = load_llm_config(_test_directory("missing-env-file") / ".env")
         self.assertFalse(config.is_complete())
         self.assertEqual(config.base_url, "")
 
     def test_build_api_accepts_uppercase_env_file_when_default_env_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / ".env"
-            (Path(tmp) / ".ENV").write_text(
-                "BASE_URL=https://example.com/v1\n"
-                "API_KEY=secret-key\n"
-                "MODEL=test-model\n",
-                encoding="utf-8",
-            )
-            api = build_api(WORKBOOK, env_path=env_path)
+        directory = _test_directory("uppercase-env-file")
+        env_path = directory / ".env"
+        (directory / ".ENV").write_text(
+            "BASE_URL=https://example.com/v1\n"
+            "API_KEY=secret-key\n"
+            "MODEL=test-model\n",
+            encoding="utf-8",
+        )
+        api = build_api(WORKBOOK, env_path=env_path)
         self.assertTrue(api.meta()["ai_configured"])
 
     def test_env_file_is_dot_env(self):
@@ -423,9 +459,8 @@ class TestChatApi(unittest.TestCase):
     def _build_api_with(self, llm_caller):
         return QueryApi(
             engine=self.engine,
-            assistant_service=StandardAssistant(self.engine, config=self.config),
+            assistant_service=StandardAssistant(self.engine, config=self.config, llm_caller=llm_caller),
             llm_config=self.config,
-            llm_caller=llm_caller,
         )
 
     def test_chat_returns_empty_message_warning(self):
@@ -513,8 +548,10 @@ class TestChatApi(unittest.TestCase):
         self.assertTrue(payload["sources"])
 
     def test_meta_unconfigured_when_env_file_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            api = build_api(WORKBOOK, env_path=Path(tmp) / ".env")
+        api = build_api(
+            WORKBOOK,
+            env_path=_test_directory("api-missing-env-file") / ".env",
+        )
         self.assertFalse(api.meta()["ai_configured"])
         payload = api.chat("岩棉的国内标准")
         self.assertEqual(payload["error"], "config_missing")
@@ -526,9 +563,8 @@ class TestChatHttpHandler(unittest.TestCase):
         config = LLMConfig("https://example.com/v1", "k", "m")
         api = QueryApi(
             engine=engine,
-            assistant_service=StandardAssistant(engine, config=config),
+            assistant_service=StandardAssistant(engine, config=config, llm_caller=lambda messages: "ok"),
             llm_config=config,
-            llm_caller=lambda messages: "ok",
         )
         response = _run_handler(api, "POST", "/api/chat", json.dumps({"message": "岩棉的国内标准"}))
         self.assertEqual(response["status"], 200)
@@ -558,13 +594,35 @@ class TestChatHttpHandler(unittest.TestCase):
         response = _run_handler(api, "POST", "/api/chat", "not-json")
         self.assertEqual(response["status"], 400)
 
+    def test_post_chat_invalid_content_length_returns_400(self):
+        api = build_api(WORKBOOK)
+        response = _run_handler(
+            api,
+            "POST",
+            "/api/chat",
+            "{}",
+            content_length="not-a-number",
+        )
+        self.assertEqual(response["status"], 400)
+
+    def test_post_chat_oversized_body_returns_413(self):
+        api = build_api(WORKBOOK)
+        response = _run_handler(
+            api,
+            "POST",
+            "/api/chat",
+            "{}",
+            content_length=str(65 * 1024),
+        )
+        self.assertEqual(response["status"], 413)
+
     def test_post_chat_endpoint_returns_404_for_unknown_path(self):
         api = build_api(WORKBOOK)
         response = _run_handler(api, "POST", "/api/unknown", "{}")
         self.assertEqual(response["status"], 404)
 
 
-def _run_handler(api, method, path, body):
+def _run_handler(api, method, path, body, content_length=None):
     from io import BytesIO
     from email.message import Message
 
@@ -586,7 +644,7 @@ def _run_handler(api, method, path, body):
     handler.requestline = f"{method} {path} HTTP/1.1"
 
     headers = Message()
-    headers["Content-Length"] = str(len(raw_body))
+    headers["Content-Length"] = content_length or str(len(raw_body))
     if raw_body:
         headers["Content-Type"] = "application/json"
     handler.headers = headers

@@ -1,0 +1,10 @@
+.venv
+.tmp
+.git
+.gitignore
+.env
+docs/.env
+docs/.env.*
+*.pyc
+__pycache__
+.qoderworkcn

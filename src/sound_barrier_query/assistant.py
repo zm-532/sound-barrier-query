@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from collections.abc import Callable, Iterable
@@ -14,6 +15,8 @@ from .aliases import (
 from .config import LLMConfig
 from .llm import ChatMessage, LLMError, chat_completions
 from .search import SearchEngine, normalize
+
+logger = logging.getLogger("sound_barrier_query.assistant")
 
 SYSTEM_PROMPT = (
     "你是“声屏障标准查询系统”的AI助手，"
@@ -93,7 +96,7 @@ class StandardAssistant:
                 "answer": CONFIG_MISSING_MESSAGE,
                 "summary": CONFIG_MISSING_MESSAGE,
                 "clauses": clauses,
-                "sources": [_to_source(clause) for clause in clauses],
+                "sources": [to_source_dict(clause) for clause in clauses],
                 "error": "config_missing",
             }
 
@@ -108,7 +111,7 @@ class StandardAssistant:
                 "answer": str(error),
                 "summary": str(error),
                 "clauses": clauses,
-                "sources": [_to_source(clause) for clause in clauses],
+                "sources": [to_source_dict(clause) for clause in clauses],
                 "error": "llm_failed",
             }
 
@@ -117,7 +120,7 @@ class StandardAssistant:
             "answer": text,
             "summary": text,
             "clauses": clauses,
-            "sources": [_to_source(clause) for clause in clauses],
+            "sources": [to_source_dict(clause) for clause in clauses],
         }
 
     def _build_suggestions(self, clauses: list[dict[str, Any]]) -> list[str]:
@@ -129,42 +132,85 @@ class StandardAssistant:
         return suggestions
 
 
+def _match_product(engine: SearchEngine, expanded_question: str) -> tuple[str, list[dict[str, Any]]]:
+    """Try to match a product/material from the expanded question.
+
+    Searches engine.materials first (sheet names), then engine.products.
+    Returns (matched_product, product_hits) or ("", []) if no match.
+    """
+    for product in sorted(engine.materials, key=len, reverse=True):
+        if product and product in expanded_question:
+            hits = engine.search_product(product, limit=max(len(engine.clauses), 48))
+            strict_hits = [
+                row for row in hits
+                if normalize(str(row.get("sheet", ""))) == normalize(product)
+                or normalize(str(row.get("product", ""))) == normalize(product)
+            ]
+            return product, (strict_hits if strict_hits else hits)
+
+    for product in sorted(engine.products, key=len, reverse=True):
+        if product and product in expanded_question:
+            hits = engine.search_product(product, limit=max(len(engine.clauses), 48))
+            return product, hits
+
+    return "", []
+
+
+def _rank_product_hits(
+    product_hits: list[dict[str, Any]],
+    matched_product: str,
+    question: str,
+    scope_terms: list[str],
+) -> list[dict[str, Any]]:
+    """Rank product hits by item-term relevance and scope filtering."""
+    group_item_terms = material_item_terms_for_query(matched_product, question)
+    if not group_item_terms:
+        # Fall back: resolve item aliases (e.g. "隔音量" → "计权隔声量")
+        # and look up matching items in the material's item groups.
+        from .aliases import MATERIAL_ITEM_GROUPS, item_terms_for_query
+
+        matched_items = item_terms_for_query(question)
+        material_groups = MATERIAL_ITEM_GROUPS.get(matched_product, {})
+        fallback_terms: list[str] = []
+        for group_items in material_groups.values():
+            for item in group_items:
+                if normalize(item) in [normalize(mi) for mi in matched_items]:
+                    fallback_terms.append(item)
+        group_item_terms = list(dict.fromkeys(fallback_terms))
+
+    if group_item_terms:
+        return _filter_rows_by_exact_item_terms(product_hits, group_item_terms, scope_terms)
+    return _filter_by_terms(product_hits, question, matched_product, scope_terms)
+
+
+def _search_across_products(
+    engine: SearchEngine,
+    item_terms: list[str],
+    scope_terms: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Search across all materials by item terms, falling back to keyword search."""
+    ranked = _search_by_item_terms(engine, item_terms, scope_terms, limit=limit * 4)
+    if not ranked:
+        expanded_question = expand_query_with_aliases(
+            " ".join(item_terms) if item_terms else ""
+        )
+        ranked = _search_with_terms(engine, expanded_question, limit=limit * 4)
+    return ranked
+
+
 def _retrieve(engine: SearchEngine, question: str, limit: int) -> list[dict[str, Any]]:
     expanded_question = expand_query_with_aliases(question)
     scope_terms = scope_terms_for_query(question)
     item_terms = item_terms_for_query(question)
-    product_hits: list[dict[str, Any]] = []
-    matched_product = ""
-    for product in sorted(engine.materials, key=len, reverse=True):
-        if product and product in expanded_question:
-            matched_product = product
-            product_hits = engine.search_product(product, limit=max(limit * 4, len(engine.clauses)))
-            strict_hits = [
-                row
-                for row in product_hits
-                if normalize(str(row.get("sheet", ""))) == normalize(product)
-                or normalize(str(row.get("product", ""))) == normalize(product)
-            ]
-            if strict_hits:
-                product_hits = strict_hits
-            break
-    if not product_hits:
-        for product in sorted(engine.products, key=len, reverse=True):
-            if product and product in expanded_question:
-                matched_product = product
-                product_hits = engine.search_product(product, limit=max(limit * 4, len(engine.clauses)))
-                break
+    logger.debug("retrieve: q=%r scope=%s items=%s", question[:60], scope_terms, item_terms[:3])
+
+    matched_product, product_hits = _match_product(engine, expanded_question)
 
     if product_hits:
-        group_item_terms = material_item_terms_for_query(matched_product, question)
-        if group_item_terms:
-            ranked = _filter_rows_by_exact_item_terms(product_hits, group_item_terms, scope_terms)
-        else:
-            ranked = _filter_by_terms(product_hits, expanded_question, matched_product, scope_terms)
+        ranked = _rank_product_hits(product_hits, matched_product, question, scope_terms)
     else:
-        ranked = _search_by_item_terms(engine, item_terms, scope_terms, limit=limit * 4)
-        if not ranked:
-            ranked = _search_with_terms(engine, expanded_question, limit=limit * 4)
+        ranked = _search_across_products(engine, item_terms, scope_terms, limit)
 
     if not ranked and not product_hits:
         ranked = engine.search_keyword(expanded_question, limit=limit * 4)
@@ -358,7 +404,7 @@ def _search_by_item_terms(
     return rows[:limit]
 
 
-def _to_source(clause: dict[str, Any]) -> dict[str, str]:
+def to_source_dict(clause: dict[str, Any]) -> dict[str, str]:
     return {
         "product": str(clause.get("product", "")),
         "item": str(clause.get("item", "")),
@@ -386,20 +432,31 @@ def build_rag_messages(
     ]
 
 
+_MAX_CONTEXT_CHARS = 6000
+_MAX_REQUIREMENT_CHARS = 200
+
+
 def _format_context(clauses: list[dict[str, Any]]) -> str:
     if not clauses:
         return "（无检索结果）"
     lines: list[str] = []
+    total_chars = 0
     for index, clause in enumerate(clauses, start=1):
         product = clause.get("product", "")
         item = clause.get("item", "")
         standard = clause.get("standard", "")
-        requirement = clause.get("requirement", "")
+        requirement = str(clause.get("requirement", ""))
         source_id = clause.get("source_id", "")
-        lines.append(
+        if len(requirement) > _MAX_REQUIREMENT_CHARS:
+            requirement = requirement[:_MAX_REQUIREMENT_CHARS] + "…"
+        line = (
             f"{index}. 产品/材料：{product}；项目名称：{item}；"
             f"标准：{standard}；技术要求：{requirement}；来源：{source_id}"
         )
+        if total_chars + len(line) > _MAX_CONTEXT_CHARS and lines:
+            break
+        lines.append(line)
+        total_chars += len(line)
     return "\n".join(lines)
 
 

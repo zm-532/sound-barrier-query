@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import mimetypes
-from collections.abc import Callable
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .assistant import StandardAssistant, clean_llm_answer
+from .assistant import LLMCaller, StandardAssistant, to_source_dict
 from .config import LLMConfig, load_llm_config
-from .llm import LLMError
 from .search import SearchEngine
 from .xlsx_loader import load_workbook_clauses, load_workbook_tables
 
@@ -19,8 +18,8 @@ DEFAULT_WORKBOOK = Path(__file__).resolve().parents[2] / "docs" / "国内声屏�
 DEFAULT_FOREIGN_WORKBOOK = Path(__file__).resolve().parents[2] / "docs" / "国外及香港声屏障标准汇总表本.xlsx"
 DEFAULT_ENV = Path(__file__).resolve().parents[2] / ".env"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-
-LLMCaller = Callable[[str, list[dict[str, object]]], str]
+MAX_CHAT_BODY_BYTES = 64 * 1024
+logger = logging.getLogger("sound_barrier_query")
 
 
 @dataclass
@@ -75,28 +74,15 @@ class QueryApi:
                 "sources": [],
             }
 
-        if self.llm_caller is not None:
-            try:
-                from .assistant import build_rag_messages
-
-                answer_text = self.llm_caller(build_rag_messages(text, clauses))
-            except LLMError as error:
-                return {
-                    "answer": str(error),
-                    "sources": [_source_payload(clause) for clause in clauses],
-                    "error": "llm_failed",
-                }
-            return {
-                "answer": clean_llm_answer(answer_text) or "当前标准库未检索到相关内容。",
-                "sources": [_source_payload(clause) for clause in clauses],
-            }
-
         response = self.assistant_service.answer_with_llm(text, clauses)
-        return {
+        payload: dict[str, object] = {
             "answer": response.get("answer", ""),
             "sources": response.get("sources", []),
-            "error": response.get("error"),
         }
+        error = response.get("error")
+        if error:
+            payload["error"] = error
+        return payload
 
     def meta(self) -> dict[str, object]:
         return {
@@ -123,7 +109,7 @@ def build_api(
     engine = SearchEngine(clauses, tables=tables)
     values = load_llm_config(env_path)
     config = values if values.is_complete() else None
-    assistant_service = StandardAssistant(engine, config=config)
+    assistant_service = StandardAssistant(engine, config=config, llm_caller=llm_caller)
     return QueryApi(
         engine=engine,
         assistant_service=assistant_service,
@@ -132,19 +118,7 @@ def build_api(
     )
 
 
-def _source_payload(clause: dict[str, object]) -> dict[str, str]:
-    return {
-        "product": str(clause.get("product", "")),
-        "item": str(clause.get("item", "")),
-        "standard": str(clause.get("standard", "")),
-        "requirement": str(clause.get("requirement", "")),
-        "source_id": str(clause.get("source_id", "")),
-        "source_link": str(clause.get("source_link", "")),
-        "sheet": str(clause.get("sheet", "")),
-    }
-
-
-def create_handler(api: QueryApi) -> type[BaseHTTPRequestHandler]:
+def create_handler(api: QueryApi, *, cors_origin: str = "") -> type[BaseHTTPRequestHandler]:
     class RequestHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -160,11 +134,17 @@ def create_handler(api: QueryApi) -> type[BaseHTTPRequestHandler]:
                 return
             self._send_json({"error": "接口不存在"}, status=404)
 
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self._add_cors_headers()
+            self.end_headers()
+
         def log_message(self, format: str, *args: object) -> None:
-            return
+            logger.info("%s %s", self.client_address[0], format % args)
 
         def _handle_api(self, path: str, params: dict[str, list[str]]) -> None:
             query = _param(params, "q")
+            logger.debug("API %s q=%r", path, query)
             if path == "/api/search":
                 payload = api.search(query, _param(params, "mode", "keyword"))
             elif path == "/api/fuzzy-search":
@@ -183,7 +163,14 @@ def create_handler(api: QueryApi) -> type[BaseHTTPRequestHandler]:
             self._send_json(payload)
 
         def _handle_chat(self) -> None:
-            length = int(self.headers.get("Content-Length", "0") or "0")
+            try:
+                length = int(self.headers.get("Content-Length", "0") or "0")
+            except ValueError:
+                self._send_json({"error": "Content-Length 必须是数字"}, status=400)
+                return
+            if length > MAX_CHAT_BODY_BYTES:
+                self._send_json({"error": "请求体过大"}, status=413)
+                return
             raw_body = self.rfile.read(length) if length else b""
             try:
                 body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
@@ -191,13 +178,16 @@ def create_handler(api: QueryApi) -> type[BaseHTTPRequestHandler]:
                 self._send_json({"error": "请求体不是合法 JSON"}, status=400)
                 return
             message = body.get("message", "") if isinstance(body, dict) else ""
+            logger.debug("Chat request: %r", message[:80])
             payload = api.chat(message if isinstance(message, str) else "")
             self._send_json(payload)
 
         def _handle_static(self, path: str) -> None:
             relative = "index.html" if path in {"", "/"} else path.lstrip("/")
             file_path = (STATIC_DIR / relative).resolve()
-            if STATIC_DIR not in file_path.parents and file_path != STATIC_DIR:
+            try:
+                file_path.relative_to(STATIC_DIR)
+            except ValueError:
                 self.send_error(403)
                 return
             if not file_path.exists() or not file_path.is_file():
@@ -216,8 +206,15 @@ def create_handler(api: QueryApi) -> type[BaseHTTPRequestHandler]:
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self._add_cors_headers()
             self.end_headers()
             self.wfile.write(data)
+
+        def _add_cors_headers(self) -> None:
+            if cors_origin:
+                self.send_header("Access-Control-Allow-Origin", cors_origin)
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     return RequestHandler
 
@@ -236,16 +233,25 @@ def main() -> None:
     parser.add_argument("--workbook", default=str(DEFAULT_WORKBOOK))
     parser.add_argument("--foreign-workbook", default=str(DEFAULT_FOREIGN_WORKBOOK))
     parser.add_argument("--env", default=str(DEFAULT_ENV))
+    parser.add_argument("--cors-origin", default="", help="CORS 允许的源，例如 http://localhost:3000")
+    parser.add_argument("--log-level", default="INFO", help="日志级别：DEBUG/INFO/WARNING")
     args = parser.parse_args()
 
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
     api = build_api(args.workbook, args.foreign_workbook, args.env)
-    print(f"声屏障标准查询系统已启动：http://{args.host}:{args.port}")
-    print(
-        "AI接口配置状态：",
+    logger.info("声屏障标准查询系统已启动：http://%s:%s", args.host, args.port)
+    logger.info(
+        "AI接口配置状态：%s",
         "已配置" if api.meta().get("ai_configured") else "未配置（请检查 .env）",
     )
     try:
-        server = ThreadingHTTPServer((args.host, args.port), create_handler(api))
+        server = ThreadingHTTPServer(
+            (args.host, args.port), create_handler(api, cors_origin=args.cors_origin)
+        )
         server.serve_forever()
     except KeyboardInterrupt:
         pass

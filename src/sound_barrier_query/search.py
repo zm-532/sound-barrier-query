@@ -71,6 +71,16 @@ class SearchEngine:
 
     def material_table(self, material: str) -> dict[str, object]:
         sheet_name = self._resolve_material(material)
+        if not sheet_name:
+            return {
+                "material": material,
+                "title": f"未找到 {material} 的标准信息",
+                "group": "",
+                "base_columns": [],
+                "standard_columns": [],
+                "rows": [],
+                "error": "material_not_found",
+            }
         if sheet_name in self.table_by_material:
             table = self.table_by_material[sheet_name]
             return {
@@ -213,13 +223,15 @@ class SearchEngine:
 
     def _resolve_material(self, material: str) -> str:
         needle = normalize(material)
+        if not needle:
+            return ""
         for sheet in self.materials:
             if normalize(sheet) == needle:
                 return sheet
         for sheet in self.materials:
             if needle in normalize(sheet):
                 return sheet
-        return self.materials[0] if self.materials else material
+        return ""
 
     def _search_terms(self, terms: list[str], limit: int) -> list[dict[str, str | int]]:
         if not terms:
@@ -231,7 +243,7 @@ class SearchEngine:
             )
             matched_count = sum(1 for term in terms if normalize(term) in haystack)
             if matched_count:
-                matches.append(SearchResult(matched_count * 100 + len(haystack), clause))
+                matches.append(SearchResult(_clause_term_score(clause, terms), clause))
         return _ranked_dicts(matches, limit)
 
     def search(self, query: str, mode: str, limit: int = 100) -> list[dict[str, str | int]]:
@@ -263,11 +275,40 @@ def _empty_fuzzy_payload(query: str) -> dict[str, object]:
 
 
 def _extract_search_terms(query: str, material: str) -> list[str]:
+    normalized_material = normalize(material) if material else ""
+
+    # If query contains spaces, split into segments for multi-keyword support.
+    if " " in query:
+        raw_segments = query.split()
+        terms: list[str] = []
+        for segment in raw_segments:
+            text = normalize(segment)
+            if not text:
+                continue
+            if normalized_material and normalized_material in text:
+                text = text.replace(normalized_material, "")
+            if not text:
+                continue
+            cleaned = text
+            for stopword in _STOPWORDS:
+                cleaned = cleaned.replace(normalize(stopword), "")
+            if cleaned and len(cleaned) >= 2:
+                terms.append(cleaned)
+        if terms:
+            seen: set[str] = set()
+            result: list[str] = []
+            for term in terms:
+                if term not in seen:
+                    seen.add(term)
+                    result.append(term)
+            return result
+
+    # Fallback: original single-term behavior for non-space queries.
     text = normalize(query)
-    if material:
-        text = text.replace(normalize(material), "")
+    if normalized_material:
+        text = text.replace(normalized_material, "")
     for stopword in _STOPWORDS:
-        text = text.replace(stopword, "")
+        text = text.replace(normalize(stopword), "")
     return [text] if text else []
 
 
@@ -292,6 +333,30 @@ def _score_text(needle: str, haystack: str) -> int:
     if haystack.startswith(needle):
         return 80
     return max(1, 60 - haystack.find(needle))
+
+
+def _clause_term_score(clause: StandardClause, terms: list[str]) -> int:
+    score = 0
+    fields = (
+        (clause.item, 1000),
+        (clause.standard, 700),
+        (clause.sheet, 500),
+        (clause.product, 500),
+        (clause.requirement, 100),
+    )
+    for term in terms:
+        normalized_term = normalize(term)
+        if not normalized_term:
+            continue
+        for value, weight in fields:
+            normalized_value = normalize(value)
+            if normalized_value == normalized_term:
+                score += weight + 300
+            elif normalized_value.startswith(normalized_term):
+                score += weight + 150
+            elif normalized_term in normalized_value:
+                score += weight
+    return score
 
 
 def _ranked_dicts(matches: list[SearchResult], limit: int) -> list[dict[str, str | int]]:

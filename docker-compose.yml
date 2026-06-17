@@ -1,0 +1,14 @@
+services:
+  query:
+    build: .
+    container_name: sound-barrier-query
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    command: >
+      sound-barrier-query
+      --host 0.0.0.0
+      --port 8765
+      --log-level INFO
